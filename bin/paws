@@ -1,0 +1,252 @@
+#!/usr/bin/env zsh
+# paws - AWS Smart Login - Intelligent AWS SSO authentication checker
+# Usage: paws [--login | --status | --help]
+
+# set -e
+
+# Load common functions (must be at top level)
+source "${0:A:h}/p-common.zsh"
+
+get_caller_identity() {
+  aws sts get-caller-identity --no-cli-pager 2>/dev/null
+}
+
+# Check if login should be refreshed based on authentication status and grace period
+# Returns success (0) if authenticated and session is valid beyond grace period
+# Returns failure (1) if not authenticated or session expires within grace period
+# Args:
+#   $1 - grace_period_minutes (default: 0) - minutes before expiry to consider refresh needed
+should_refresh_login() {
+  local grace_period_minutes=${1:-0}
+
+  # First check if AWS credentials work at all
+  get_caller_identity &>/dev/null || return 1
+
+  # If no grace period specified, just return success
+  [[ $grace_period_minutes -eq 0 ]] && return 0
+
+  # Check if session will expire within grace period
+  local expires_at=$(get_sso_session_expiration)
+  [[ -z "$expires_at" ]] && return 0  # No expiration info, assume valid
+
+  local remaining_seconds=$(get_remaining_seconds "$expires_at")
+  [[ -z "$remaining_seconds" ]] && return 1  # Already expired
+
+  local grace_period_seconds=$((grace_period_minutes * 60))
+  [[ $remaining_seconds -gt $grace_period_seconds ]]
+}
+
+# Get AWS SSO session expiration time from cache
+# Returns the expiresAt timestamp from the newest cache file with accessToken
+# Returns failure if no valid cache file is found or expiresAt is missing
+get_sso_session_expiration() {
+  local cache_dir="${HOME}/.aws/sso/cache"
+  [[ -d "$cache_dir" ]] || return 1
+
+  setopt local_options null_glob
+  local cache_files=("${cache_dir}"/*.json)
+  [[ ${#cache_files[@]} -eq 0 ]] && return 1
+
+  local session_cache=""
+  local newest_time=0
+
+  # Find the newest cache file containing an accessToken
+  for file in "${cache_files[@]}"; do
+    if grep -q '"accessToken"' "$file" 2>/dev/null; then
+      local mod_time=$(stat -f %m "$file" 2>/dev/null)
+      if [[ -n "$mod_time" ]] && [[ $mod_time -gt $newest_time ]]; then
+        newest_time=$mod_time
+        session_cache="$file"
+      fi
+    fi
+  done
+
+  [[ -z "$session_cache" ]] && return 1
+
+  # Extract and return expiresAt from the cache file
+  local expires_at=$(grep -o '"expiresAt"[[:space:]]*:[[:space:]]*"[^"]*"' "$session_cache" | grep -o '"[^"]*"$' | tr -d '"')
+  [[ -n "$expires_at" ]] && echo "$expires_at"
+}
+
+show_status() {
+  print_status "$P_YELLOW" "Checking AWS SSO status..."
+  echo
+
+  if ! should_refresh_login; then
+    print_status "$P_RED" "✗ Not authenticated or session expired"
+    echo
+    print_status "$P_YELLOW" "Run with --login flag to authenticate:"
+    print_status "$P_BLUE" "  $0 --login"
+    return 1
+  fi
+
+  local identity=$(get_caller_identity)
+  local user_id=$(extract_json_value "$identity" "UserId")
+  local account=$(extract_json_value "$identity" "Account")
+  local arn=$(extract_json_value "$identity" "Arn")
+
+  print_status "$P_GREEN" "✓ Authenticated"
+  echo "  Account: ${account}"
+  echo "  User ID: ${user_id}"
+  echo "  ARN: ${arn}"
+
+  local expires_at=$(get_sso_session_expiration)
+  if [[ -n "$expires_at" ]]; then
+    echo
+    print_status "$P_YELLOW" "Session Details:"
+    echo "  Expires: ${expires_at}"
+
+    local remaining_seconds=$(get_remaining_seconds "$expires_at")
+    if [[ -n "$remaining_seconds" ]]; then
+      local time_str=$(format_time_remaining "$remaining_seconds")
+      print_status "$P_GREEN" "  Time remaining: ${time_str}"
+    else
+      print_status "$P_RED" "  Session expired!"
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
+perform_login() {
+  local grace_period_minutes=${1:-30}
+  local force_login=${2:-false}
+
+  print_status "$P_YELLOW" "🔐 Checking AWS credentials..."
+
+  # Skip authentication check if force login requested
+  if [[ "$force_login" == "true" ]]; then
+    print_status "$P_YELLOW" "  Force login requested, running aws sso login..."
+    if aws sso login; then
+      print_status "$P_GREEN" "✓ AWS login successful"
+      return 0
+    else
+      die "AWS SSO login failed"
+    fi
+  fi
+
+  if should_refresh_login "$grace_period_minutes"; then
+    local expires_at=$(get_sso_session_expiration)
+    if [[ -n "$expires_at" ]]; then
+      local remaining_seconds=$(get_remaining_seconds "$expires_at")
+      if [[ -n "$remaining_seconds" ]]; then
+        local time_str=$(format_time_remaining "$remaining_seconds")
+        print_status "$P_GREEN" "✓ Already authenticated (${time_str} remaining)"
+        return 0
+      fi
+    fi
+    print_status "$P_GREEN" "✓ Already authenticated"
+    return 0
+  fi
+
+  # Check if expired or expiring soon
+  local expires_at=$(get_sso_session_expiration)
+  if should_refresh_login 0; then
+    # Authenticated but expiring soon
+    if [[ -n "$expires_at" ]]; then
+      local remaining_seconds=$(get_remaining_seconds "$expires_at")
+      if [[ -n "$remaining_seconds" ]]; then
+        local time_str=$(format_time_remaining "$remaining_seconds")
+        print_status "$P_YELLOW" "⚠ Session expiring soon (${time_str} remaining)"
+      fi
+    fi
+  else
+    # Not authenticated or already expired
+    print_status "$P_RED" "✗ Credentials expired or invalid"
+  fi
+
+  print_status "$P_YELLOW" "  Running aws sso login..."
+
+  if aws sso login; then
+    print_status "$P_GREEN" "✓ AWS login successful"
+    return 0
+  else
+    die "AWS SSO login failed"
+  fi
+}
+
+show_help() {
+  cat << 'EOF'
+AWS Smart Login - Intelligent AWS SSO authentication checker
+
+USAGE:
+  paws [OPTIONS]
+
+OPTIONS:
+  (no args)             Perform smart login (with 30min grace period)
+  --status, -s          Show detailed authentication status
+  --force, -f           Force login even if already authenticated
+  --grace, -g <mins>    Set grace period in minutes (default: 30)
+  --help, -h            Show this help message
+
+GRACE PERIOD:
+  By default, paws performs smart login with a 30-minute grace period.
+  Authentication is refreshed if the session expires within the specified time.
+  This prevents mid-task expirations during long-running operations.
+
+EXIT CODES:
+  0   Authenticated
+  1   Not authenticated or error
+
+EXAMPLES:
+  paws                               # Smart login with 30min grace period
+  paws --status                      # Check status without login
+  paws --force                       # Force re-authentication
+  paws --grace-period 60             # Smart login with 60min grace period
+  paws && terraform apply            # Ensure valid session before Terraform
+EOF
+}
+
+main() {
+  local grace_period=30
+  local action="login"  # Default action is smart login
+  local force_login="false"
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        show_help
+        exit 0
+        ;;
+      --status|-s)
+        action="status"
+        shift
+        ;;
+      --force|-f)
+        force_login="true"
+        action="login"
+        shift
+        ;;
+      --grace|-g)
+        if [[ -z "${2:-}" ]] || [[ ! "$2" =~ ^[0-9]+$ ]]; then
+          die "Grace period must be a positive number"
+        fi
+        grace_period=$2
+        shift 2
+        ;;
+      "")
+        shift
+        ;;
+      *)
+        die "Unknown option: $1. Use --help for usage information."
+        ;;
+    esac
+  done
+
+  # Execute action
+  case "$action" in
+    status)
+      show_status
+      exit $?
+      ;;
+    login)
+      perform_login "$grace_period" "$force_login"
+      exit $?
+      ;;
+  esac
+}
+
+# Main execution, skip if sourced (in tests)
+[[ $ZSH_EVAL_CONTEXT =~ :file$ ]] && return || main "$@"

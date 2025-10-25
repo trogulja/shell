@@ -1,0 +1,180 @@
+#!/usr/bin/env zsh
+# ppr - Find and open pull request for current git branch
+# Usage: ppr [OPTIONS]
+
+set -e
+
+# Load common functions (must be at top level)
+source "${0:A:h}/p-common.zsh"
+
+# Protected branches that require confirmation before opening PR
+typeset -ra PROTECTED_BRANCHES=(master main develop)
+
+# Check if current branch is a protected branch
+# Usage: is_protected_branch <branch>
+# Returns: 0 if protected, 1 if not
+is_protected_branch() {
+  local branch=$1
+  for protected in "${PROTECTED_BRANCHES[@]}"; do
+    if [[ "$branch" == "$protected" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Get the current git branch name
+# Usage: get_current_branch
+# Returns: current branch name
+# Exits: with error if not in a git repository or cannot determine branch
+get_current_branch() {
+  local branch
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || \
+    die "Could not determine current branch"
+
+  if [[ -z "$branch" ]]; then
+    die "Could not determine current branch"
+  fi
+
+  echo "$branch"
+}
+
+# Check if current branch has an upstream set
+# Usage: has_upstream
+# Returns: 0 if upstream is set, 1 if not
+has_upstream() {
+  git rev-parse --abbrev-ref --symbolic-full-name @{u} &>/dev/null
+}
+
+# Get pull request information for current branch
+# Usage: get_pr_for_branch <branch>
+# Returns: PR number, title, and URL (tab-separated)
+# Exits: with error if gh command fails or no PR found
+get_pr_for_branch() {
+  local branch=$1
+  local pr_data
+
+  pr_data=$(gh pr list --head "$branch" --state all --json number,title,url --limit 1 2>/dev/null) || \
+    die "Failed to fetch pull request data"
+
+  if [[ -z "$pr_data" ]] || [[ "$pr_data" == "[]" ]]; then
+    die "No pull request found for branch '${P_YELLOW}${branch}${P_NC}'"
+  fi
+
+  echo "$pr_data" | jq -r '.[] | "\(.number)\t\(.title)\t\(.url)"' 2>/dev/null || \
+    die "Failed to parse pull request data"
+}
+
+# Parse PR data and extract components
+# Usage: parse_pr_data <pr_data>
+# Sets global variables: pr_number, pr_title, pr_url
+parse_pr_data() {
+  local pr_data=$1
+
+  pr_number=$(echo "$pr_data" | cut -f1)
+  pr_title=$(echo "$pr_data" | cut -f2)
+  pr_url=$(echo "$pr_data" | cut -f3)
+
+  if [[ -z "$pr_number" || -z "$pr_title" || -z "$pr_url" ]]; then
+    die "Failed to parse pull request data"
+  fi
+}
+
+# Open PR URL in browser
+# Usage: open_pr_url <url>
+# Exits: with error if open command fails
+open_pr_url() {
+  local url=$1
+
+  if ! open "$url"; then
+    die "Failed to open URL in browser"
+  fi
+}
+
+show_help() {
+  cat << 'EOF'
+Find and open pull request for current git branch
+
+USAGE:
+  ppr [OPTIONS]
+
+OPTIONS:
+  --help, -h   Show this help message
+
+DESCRIPTION:
+  Finds the pull request associated with the current git branch
+  and opens it in the default browser. Shows PR number, title, and URL.
+
+  Requires:
+  - Git repository with remote configured
+  - GitHub CLI (gh) installed and authenticated
+  - Current branch has upstream set
+  - Current branch is not master/main/develop
+
+EXIT CODES:
+  0   Success
+  1   Error occurred
+
+EXAMPLES:
+  ppr              # Find and open PR for current branch
+  ppr --help       # Show this help
+EOF
+}
+
+main() {
+  # Handle help flag
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    show_help
+    exit 0
+  fi
+
+  # Check required commands
+  print_status "$P_YELLOW" "🔍 Checking prerequisites..."
+  check_command git
+  check_command gh
+  echo
+
+  # Get current branch
+  print_status "$P_YELLOW" "📍 Detecting current branch..."
+  local branch
+  branch=$(get_current_branch)
+  print_status "$P_BLUE" "  Branch: $branch"
+  echo
+
+  # Check if on protected branch
+  if is_protected_branch "$branch"; then
+    die "Cannot open PR for protected branch '${P_YELLOW}${branch}${P_NC}'"
+  fi
+
+  # Check if upstream is set
+  print_status "$P_YELLOW" "🔗 Checking upstream..."
+  if ! has_upstream; then
+    die "No upstream branch set for '${P_YELLOW}${branch}${P_NC}'"
+  fi
+  print_status "$P_GREEN" "✓ Upstream is configured"
+  echo
+
+  # Get PR information
+  print_status "$P_YELLOW" "🔎 Fetching pull request..."
+  local pr_data
+  pr_data=$(get_pr_for_branch "$branch") || exit 1
+
+  # Parse PR data
+  local pr_number pr_title pr_url
+  parse_pr_data "$pr_data"
+
+  echo
+  print_status "$P_GREEN" "✓ Pull Request Found"
+  print_status "$P_BLUE" "  #$pr_number: $pr_title"
+  print_status "$P_BLUE" "  URL: $pr_url"
+  echo
+
+  # Open PR in browser
+  print_status "$P_YELLOW" "🌐 Opening in browser..."
+  open_pr_url "$pr_url" || exit 1
+
+  print_status "$P_GREEN" "✓ Done"
+}
+
+# Main execution, skip if sourced (in tests)
+[[ $ZSH_EVAL_CONTEXT =~ :file$ ]] && return || main "$@"

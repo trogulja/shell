@@ -1,0 +1,141 @@
+#!/usr/bin/env zsh
+# prun-frontend - Run productive frontend with automatic setup
+# Usage: prun-frontend [OPTIONS]
+
+set -e
+
+# Load common functions (must be at top level)
+source "${0:A:h}/p-common.zsh"
+
+# Expected repository
+typeset -r EXPECTED_REPO="productiveio/frontend"
+
+show_help() {
+  cat << 'EOF'
+prun-frontend - Run productive frontend with automatic setup
+
+USAGE:
+  prun-frontend [OPTIONS]
+
+OPTIONS:
+  --pull, -l        Force pull latest changes from git before starting
+  --prod, -p        Set DEV_API_ENV=production (use production API)
+  --help, -h        Show this help message
+
+BEHAVIOR:
+  Smart Auto-Pull: Automatically pulls latest changes if the repository
+  is clean (no uncommitted changes, staged files, or unpushed commits).
+  Use --pull to force pulling even with local changes.
+
+EXAMPLES:
+  # Start frontend with dev API (auto-pulls if repo is clean)
+  prun-frontend
+
+  # Force pull even with local changes
+  prun-frontend --pull
+
+  # Start with production API
+  prun-frontend --prod
+
+  # Force pull and use production API
+  prun-frontend --pull --prod
+
+REQUIREMENTS:
+  - Must be run from productiveio/frontend repository
+  - Requires pdetect, jq, and pnpm to be installed
+EOF
+}
+
+main() {
+  local do_pull=false
+  local use_prod=false
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        show_help
+        exit 0
+        ;;
+      --pull|-l)
+        do_pull=true
+        shift
+        ;;
+      --prod|-p)
+        use_prod=true
+        shift
+        ;;
+      *)
+        die "Unknown option: $1. Use --help for usage information."
+        ;;
+    esac
+  done
+
+  print_status "$P_YELLOW" "🚀 Validating repository..."
+
+  local repo_root
+  repo_root=$(validate_repository "$EXPECTED_REPO")
+
+  print_status "$P_GREEN" "✓ Repository validated: $EXPECTED_REPO"
+  print_status "$P_BLUE" "  Root: $repo_root"
+  echo
+
+  # Change to repository root
+  cd "$repo_root" || die "Failed to change to repository root"
+
+  # Check for pnpm
+  check_command pnpm
+
+  # Smart auto-pull: enable if repository is clean and --pull not explicitly set
+  if [[ "$do_pull" == false ]]; then
+    # Check if working directory is clean (no changes, no staged files)
+    if git diff-index --quiet HEAD -- 2>/dev/null && \
+       [[ -z $(git status --porcelain 2>/dev/null) ]] && \
+       [[ -z $(git log --branches --not --remotes 2>/dev/null) ]]; then
+      do_pull=true
+      print_status "$P_BLUE" "ℹ Repository is clean, auto-enabling pull"
+      echo
+    else
+      print_status "$P_YELLOW" "ℹ Skipping auto-pull (uncommitted changes, staged files, or unpushed commits detected)"
+      print_status "$P_BLUE" "  Use --pull flag to force pull"
+      echo
+    fi
+  fi
+
+  # Set production API if requested
+  if [[ "$use_prod" == true ]]; then
+    export DEV_API_ENV=production
+    print_status "$P_BLUE" "ℹ Using production API (DEV_API_ENV=production)"
+    echo
+  else
+    unset DEV_API_ENV
+  fi
+
+  # Pull latest changes if enabled
+  if [[ "$do_pull" == true ]]; then
+    # Check if upstream is set for current branch
+    if git rev-parse --abbrev-ref --symbolic-full-name @{u} &>/dev/null; then
+      print_status "$P_YELLOW" "🚀 Pulling latest changes..."
+      git pull || die "Git pull failed"
+      print_status "$P_GREEN" "✓ Pull complete"
+      echo
+    else
+      print_status "$P_YELLOW" "ℹ Skipping pull (no upstream branch set)"
+      print_status "$P_BLUE" "  Branch: $(git rev-parse --abbrev-ref HEAD)"
+      echo
+    fi
+  fi
+
+  # Install dependencies
+  print_status "$P_YELLOW" "🚀 Installing dependencies..."
+  pnpm i || die "pnpm install failed"
+  print_status "$P_GREEN" "✓ Dependencies installed"
+  echo
+
+  # Start development server
+  print_status "$P_GREEN" "🚀 Starting development server..."
+  echo
+  pnpm start
+}
+
+main "$@"

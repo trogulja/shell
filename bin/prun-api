@@ -1,0 +1,88 @@
+#!/usr/bin/env zsh
+# prun-api - Update and run productive API with automatic setup
+# Usage: prun-api [OPTIONS]
+
+set -e
+
+# Load common functions (must be at top level)
+source "${0:A:h}/p-common.zsh"
+
+# Expected repository
+typeset -r EXPECTED_REPO="productiveio/api"
+
+show_help() {
+  cat << 'EOF'
+prun-api - Update and run productive API with automatic setup
+
+USAGE:
+  prun-api [OPTIONS]
+
+OPTIONS:
+  --help, -h        Show this help message
+
+DESCRIPTION:
+  Pulls latest changes, installs dependencies, runs migrations,
+  and starts Sidekiq for the Productive API.
+
+REQUIREMENTS:
+  - Must be run from productiveio/api repository
+  - Requires pdetect, jq, bundle, and rails to be installed
+EOF
+}
+
+main() {
+  # Handle help flag
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    show_help
+    exit 0
+  fi
+
+  print_status "$P_YELLOW" "🤖 Validating repository..."
+
+  local repo_root
+  repo_root=$(validate_repository "$EXPECTED_REPO")
+
+  print_status "$P_GREEN" "✓ Repository validated: $EXPECTED_REPO"
+  print_status "$P_BLUE" "  Root: $repo_root"
+  echo
+
+  # Change to repository root
+  cd "$repo_root" || die "Failed to change to repository root"
+
+  # Pull latest changes
+  print_status "$P_YELLOW" "🤖 Pulling latest changes..."
+  git pull || die "Git pull failed"
+  print_status "$P_GREEN" "✓ Pull complete"
+  echo
+
+  # Install dependencies
+  print_status "$P_YELLOW" "🤖 Installing gem dependencies..."
+  bundle install || die "Bundle install failed"
+  print_status "$P_GREEN" "✓ Dependencies installed"
+  echo
+
+  # Run schema migrations
+  print_status "$P_YELLOW" "🤖 Running schema migrations..."
+  bundle exec rails db:migrate || die "Schema migrations failed"
+  print_status "$P_GREEN" "✓ Schema migrations complete"
+  echo
+
+  # Run data migrations
+  print_status "$P_YELLOW" "🤖 Running data migrations..."
+  bundle exec rails data:migrate || die "Data migrations failed"
+  print_status "$P_GREEN" "✓ Data migrations complete"
+  echo
+
+  # Restore any changes
+  print_status "$P_YELLOW" "🤖 Cleaning up..."
+  git restore . || die "Git restore failed"
+  print_status "$P_GREEN" "✓ Cleanup complete"
+  echo
+
+  # Start sidekiq
+  print_status "$P_GREEN" "🤖 Starting Sidekiq..."
+  echo
+  bundle exec sidekiq
+}
+
+main "$@"

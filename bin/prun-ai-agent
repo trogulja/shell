@@ -1,0 +1,113 @@
+#!/usr/bin/env zsh
+# prun-ai-agent - Run productive AI agent with automatic setup
+# Usage: prun-ai-agent [OPTIONS]
+
+set -e
+
+# Load common functions (must be at top level)
+source "${0:A:h}/p-common.zsh"
+
+# Expected repository
+typeset -r EXPECTED_REPO="productiveio/ai-agent"
+
+show_help() {
+  cat << 'EOF'
+prun-ai-agent - Run productive AI agent with automatic setup
+
+USAGE:
+  prun-ai-agent [OPTIONS]
+
+OPTIONS:
+  --secrets, -s     Pull secrets using npx secrets-pull
+  --prod, -p        Run with production config (npm run dev:prod)
+  --help, -h        Show this help message
+
+EXAMPLES:
+  # Start AI agent in dev mode (no secrets pull)
+  prun-ai-agent
+
+  # Pull secrets and start in dev mode
+  prun-ai-agent --secrets
+
+  # Start in production mode
+  prun-ai-agent --prod
+
+  # Pull secrets and start in production mode
+  prun-ai-agent --secrets --prod
+
+REQUIREMENTS:
+  - Must be run from productiveio/ai-agent repository
+  - Requires pdetect, paws, jq, npm, and npx to be installed
+  - AWS authentication handled automatically via paws script
+EOF
+}
+
+main() {
+  local do_secrets=false
+  local use_prod=false
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        show_help
+        exit 0
+        ;;
+      --secrets|-s)
+        do_secrets=true
+        shift
+        ;;
+      --prod|-p)
+        use_prod=true
+        shift
+        ;;
+      *)
+        die "Unknown option: $1. Use --help for usage information."
+        ;;
+    esac
+  done
+
+  print_status "$P_YELLOW" "🤖 Validating repository..."
+
+  local repo_root
+  repo_root=$(validate_repository "$EXPECTED_REPO")
+
+  print_status "$P_GREEN" "✓ Repository validated: $EXPECTED_REPO"
+  print_status "$P_BLUE" "  Root: $repo_root"
+  echo
+
+  # Change to repository root
+  cd "$repo_root" || die "Failed to change to repository root"
+
+  # Check for required commands
+  check_command paws
+  check_command npm
+  check_command npx
+
+  # Authenticate with AWS using paws
+  if ! paws -g 60; then
+    die "AWS authentication failed"
+  fi
+  echo
+
+  # Pull secrets if requested
+  if [[ "$do_secrets" == true ]]; then
+    print_status "$P_YELLOW" "🤖 Pulling secrets..."
+    npx secrets-pull || die "Secrets pull failed"
+    print_status "$P_GREEN" "✓ Secrets pulled"
+    echo
+  fi
+
+  # Start the application
+  if [[ "$use_prod" == true ]]; then
+    print_status "$P_GREEN" "🤖 Starting AI agent (production mode)..."
+    echo
+    npm run dev:prod
+  else
+    print_status "$P_GREEN" "🤖 Starting AI agent (development mode)..."
+    echo
+    npm run dev
+  fi
+}
+
+main "$@"

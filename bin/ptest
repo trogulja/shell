@@ -1,0 +1,208 @@
+#!/usr/bin/env zsh
+# ptest - Interactive test selector for productiveio/frontend
+# Usage: ptest
+
+# Load common functions (must be at top level)
+source "${0:A:h}/p-common.zsh"
+
+# URL encode a string
+# Usage: url_encode <string>
+# Returns: URL encoded string
+url_encode() {
+  local string=$1
+  local encoded=""
+  local length=${#string}
+
+  for ((i=1; i<=length; i++)); do
+    local char=${string:$i-1:1}
+    case $char in
+      [a-zA-Z0-9.~_-])
+        encoded+="$char"
+        ;;
+      /)
+        encoded+="%2F"
+        ;;
+      *)
+        encoded+=$(printf '%%%02X' "'$char")
+        ;;
+    esac
+  done
+
+  echo "$encoded"
+}
+
+# Get the root directory of the current git repository
+# Usage: get_git_root
+# Returns: absolute path to repository root
+# Exits: with error if not in a git repository
+get_git_root() {
+  check_command git
+  local git_root
+  git_root=$(git rev-parse --show-toplevel 2>/dev/null) || \
+    die "Not in a git repository"
+  echo "$git_root"
+}
+
+# Check if we're in productiveio/frontend repo
+# Usage: verify_frontend_repo
+# Exits: with error if not in productiveio/frontend
+verify_frontend_repo() {
+  local git_root
+  git_root=$(get_git_root) || exit 1
+
+  local remote_url
+  remote_url=$(git remote get-url origin 2>/dev/null) || \
+    die "No git remote URL configured"
+
+  if [[ ! "$remote_url" =~ productiveio/frontend ]]; then
+    die "This script only works in productiveio/frontend repository"
+  fi
+
+  echo "$git_root"
+}
+
+# Find all test modules in the tests directory
+# Usage: find_test_modules <tests_dir>
+# Returns: list of test files with module names (format: "module_name | path/to/file")
+find_test_modules() {
+  local tests_dir=$1
+
+  check_command rg
+
+  # Search for moduleFor, moduleForIntegration, and moduleForAcceptance patterns
+  # Match test files: *-test.js, *-test.gjs, *-test.ts, *-test.gts
+  # Use ripgrep's --replace to extract module name directly
+  # Use tab as field separator to avoid conflicts with colons in module names
+  # Match only single-quoted strings (most common in the codebase)
+  rg --no-heading --with-filename --no-line-number \
+    --only-matching \
+    --field-match-separator $'\t' \
+    "moduleFor(?:Integration|Acceptance)?\('([^']+)'" \
+    "$tests_dir" \
+    -g '*-test.{js,gjs,ts,gts}' \
+    --replace '$1' \
+    | awk -F'\t' '
+      {
+        filepath = $1
+        module = $2
+
+        # Clean up file path
+        sub(/.*\/tests\//, "", filepath)
+        sub(/-test\.[gt]?[jt]s$/, "", filepath)
+
+        print module " | " filepath
+      }
+    ' \
+    | sort -u
+}
+
+# Show help message
+show_help() {
+  cat << EOF
+${P_BLUE}ptest${P_NC} - Interactive test selector for productiveio/frontend
+
+${P_YELLOW}Usage:${P_NC}
+  ptest [query]       Run interactive test selector with optional search query
+  ptest --help, -h    Show this help message
+
+${P_YELLOW}Description:${P_NC}
+  This script helps you quickly run tests in the productiveio/frontend repository.
+  It searches for test modules (unit, integration, and acceptance tests) and allows
+  you to select one via fzf. The selected test will be opened in your browser.
+
+  If you provide a search query, fzf will be pre-populated with it, allowing you to
+  quickly filter tests and jump to what you're looking for.
+
+${P_YELLOW}Requirements:${P_NC}
+  - Must be run from within productiveio/frontend repository
+  - Requires: git, ripgrep (rg), fzf
+
+${P_YELLOW}Examples:${P_NC}
+  ${P_BLUE}cd ~/code/productiveio/frontend${P_NC}
+  ${P_BLUE}ptest${P_NC}
+  # Opens fzf with all tests
+
+  ${P_BLUE}ptest acceptance:deal${P_NC}
+  # Opens fzf with "acceptance:deal" pre-filled, showing matching tests
+
+  ${P_BLUE}ptest component:gantt${P_NC}
+  # Opens fzf filtered to gantt component tests
+
+EOF
+}
+
+main() {
+  # Handle help flag
+  if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
+    show_help
+    exit 0
+  fi
+
+  # Check required commands
+  check_command git
+  check_command rg
+  check_command fzf
+
+  # Verify we're in productiveio/frontend repo
+  local git_root
+  git_root=$(verify_frontend_repo) || exit 1
+
+  # Change to repo root
+  cd "$git_root" || die "Failed to change directory to $git_root"
+
+  local tests_dir="./apps/productive/tests"
+
+  # Check if tests directory exists
+  if [[ ! -d "$tests_dir" ]]; then
+    die "Tests directory not found: $tests_dir"
+  fi
+
+  # Find all test modules
+  print_status "$P_YELLOW" "Searching for test modules..."
+  local test_modules
+  test_modules=$(find_test_modules "$tests_dir")
+
+  if [[ -z "$test_modules" ]]; then
+    die "No test modules found in $tests_dir"
+  fi
+
+  # Prepare fzf query from command line arguments
+  local initial_query="$*"
+
+  # Use fzf to select a test
+  local selected
+  selected=$(echo "$test_modules" | fzf \
+    --prompt="Select test > " \
+    --query="$initial_query" \
+    --preview='echo {}' \
+    --preview-window=up:3:wrap \
+    --height=40% \
+    --reverse)
+
+  if [[ -z "$selected" ]]; then
+    print_status "$P_YELLOW" "No test selected"
+    exit 0
+  fi
+
+  # Extract file path from selection (everything after " | ")
+  local file_path=${selected##* | }
+
+  # URL encode the file path
+  local encoded_path
+  encoded_path=$(url_encode "$file_path")
+
+  # Build the URL
+  local base_url="http://app.productive.io.localhost/tests"
+  local url="${base_url}?f=${encoded_path}"
+
+  print_status "$P_GREEN" "Opening test: $file_path"
+  print_status "$P_BLUE" "URL: $url"
+
+  # Open the URL in browser
+  open "$url"
+
+  exit 0
+}
+
+# Main execution, skip if sourced (in tests)
+[[ $ZSH_EVAL_CONTEXT =~ :file$ ]] && return || main "$@"

@@ -1,0 +1,89 @@
+#!/usr/bin/env zsh
+# pdetect - Detect git repository information
+# Output: JSON with root and repo name
+
+# Load common functions (must be at top level)
+source "${0:A:h}/p-common.zsh"
+
+# Get the root directory of the current git repository
+# Usage: get_git_root
+# Returns: absolute path to repository root
+# Exits: with error if not in a git repository
+get_git_root() {
+  check_command git
+  local git_root
+  git_root=$(git rev-parse --show-toplevel 2>/dev/null) || \
+    die "Not in a git repository"
+  echo "$git_root"
+}
+
+# Get the remote URL for the current git repository
+# Usage: get_remote_url
+# Returns: git remote URL (tries origin first, then any available remote)
+# Exits: with error if no remote is configured
+get_remote_url() {
+  local remote_url
+
+  # Try origin first (most common case)
+  remote_url=$(git remote get-url origin 2>/dev/null)
+
+  # If origin not found, try first available remote
+  if [[ -z "$remote_url" ]]; then
+    remote_url=$(git remote -v 2>/dev/null | head -n1 | awk '{print $2}')
+  fi
+
+  # If still no remote, error
+  if [[ -z "$remote_url" ]]; then
+    die "No git remote URL configured"
+  fi
+
+  echo "$remote_url"
+}
+
+# Extract repository name in org/name format from a git remote URL
+# Usage: extract_repo_name <url>
+# Returns: repository name in org/name format
+# Exits: with error if URL cannot be parsed
+# Example: extract_repo_name "git@github.com:org/repo.git"
+#   Returns: org/repo
+extract_repo_name() {
+  local url=$1
+  local repo_name
+
+  # Extract repo name using sed: handles .git suffix, various URL formats
+  # Pattern: capture text after : or / that looks like org/name with valid characters
+  # Org: alphanumeric, hyphen, underscore (no dots to avoid matching hostnames)
+  # Repo: alphanumeric, hyphen, underscore, dot
+  repo_name=$(echo "$url" | sed -E 's#^.*[:/]([a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+)\.git$#\1#; s#^.*[:/]([a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+)$#\1#')
+
+  # If repo_name is unchanged (sed didn't match), it means URL is invalid
+  if [[ "$repo_name" == "$url" ]] || [[ -z "$repo_name" ]]; then
+    die "Could not parse repository name from remote URL: ${P_YELLOW}${url}${P_NC}"
+  fi
+
+  echo "$repo_name"
+}
+
+main() {
+  local git_root
+  git_root=$(get_git_root) || exit 1
+
+  local remote_url
+  remote_url=$(get_remote_url) || exit 1
+
+  local repo_name
+  repo_name=$(extract_repo_name "$remote_url") || exit 1
+
+  # Escape special characters for JSON
+  local git_root_escaped=${git_root//\\/\\\\}
+  git_root_escaped=${git_root_escaped//\"/\\\"}
+
+  local repo_name_escaped=${repo_name//\\/\\\\}
+  repo_name_escaped=${repo_name_escaped//\"/\\\"}
+
+  echo "{\"root\":\"$git_root_escaped\",\"repo\":\"$repo_name_escaped\"}"
+  exit 0
+}
+
+# Main execution, skip if sourced (in tests)
+[[ $ZSH_EVAL_CONTEXT =~ :file$ ]] && return || main "$@"

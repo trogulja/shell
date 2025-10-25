@@ -1,0 +1,161 @@
+#!/usr/bin/env zsh
+# pci - Open CI workflow for current git branch
+# Usage: pci [--help]
+
+# Load common functions (must be at top level)
+source "${0:A:h}/p-common.zsh"
+
+# Single source of truth for the Semaphore scheduler URL pattern
+SEMAPHORE_URL_PATTERN='https://productive\.semaphoreci\.com/projects/frontend/schedulers/'
+
+# Get the current git branch name
+# Usage: get_current_branch
+# Returns: current branch name
+# Exits: with error if not in a git repository or cannot determine branch
+get_current_branch() {
+  check_command git
+
+  # Check if we're in a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    die "Not in a git repository"
+  fi
+
+  local branch
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+  if [[ -z "$branch" ]]; then
+    die "Could not determine current branch"
+  fi
+
+  echo "$branch"
+}
+
+# Find workflow file containing the Semaphore scheduler URL
+# Usage: find_workflow_file
+# Returns: path to workflow file
+# Exits: with error if workflow file not found
+find_workflow_file() {
+  local workflow_file
+  workflow_file=$(grep -r -l "$SEMAPHORE_URL_PATTERN" .github/workflows/ 2>/dev/null | head -1)
+
+  if [[ -z "$workflow_file" ]]; then
+    die "Could not find workflow file with Semaphore scheduler URL in .github/workflows/"
+  fi
+
+  echo "$workflow_file"
+}
+
+# Extract the Semaphore scheduler base URL from workflow file
+# Usage: extract_semaphore_url <workflow_file>
+# Returns: base Semaphore URL without branch parameter
+# Exits: with error if URL cannot be extracted
+extract_semaphore_url() {
+  local workflow_file=$1
+  local base_url
+
+  base_url=$(grep -o "${SEMAPHORE_URL_PATTERN}[^)]*" "$workflow_file" | head -1 | sed 's/?branch=.*//')
+
+  if [[ -z "$base_url" ]]; then
+    die "Could not extract Semaphore scheduler URL from ${P_YELLOW}${workflow_file}${P_NC}"
+  fi
+
+  echo "$base_url"
+}
+
+# Construct full CI URL with branch parameter
+# Usage: construct_ci_url <base_url> <branch>
+# Returns: full URL with branch query parameter
+construct_ci_url() {
+  local base_url=$1
+  local branch=$2
+  echo "${base_url}?branch=${branch}"
+}
+
+# Check if branch requires confirmation before opening CI
+# Usage: confirm_protected_branch <branch>
+# Returns: 0 if user confirms or branch not protected, 1 if cancelled
+# Exits: with status 0 if user cancels (not an error)
+confirm_protected_branch() {
+  local branch=$1
+
+  # Check if branch is protected
+  if [[ "$branch" == "develop" || "$branch" == "main" || "$branch" == "master" || "$branch" == release/* ]]; then
+    print_status "$P_YELLOW" "Are you sure you want to run tests for '${branch}'? (y/N)"
+    read -r confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+      print_status "$P_BLUE" "Cancelled."
+      exit 0
+    fi
+  fi
+
+  return 0
+}
+
+# Open CI workflow URL in browser
+# Usage: open_ci_url <url> <branch>
+# Exits: with error if open command fails
+open_ci_url() {
+  local url=$1
+  local branch=$2
+
+  check_command open
+
+  print_status "$P_GREEN" "Opening CI Workflow for branch: ${P_YELLOW}${branch}${P_NC}"
+  echo "$url"
+
+  if ! open "$url"; then
+    die "Failed to open URL in browser"
+  fi
+}
+
+show_help() {
+  cat << 'EOF'
+Open CI workflow for current git branch
+
+USAGE:
+  pci [OPTIONS]
+
+OPTIONS:
+  --help, -h   Show this help message
+
+DESCRIPTION:
+  Opens the Semaphore CI scheduler URL for the current git branch.
+  Prompts for confirmation when running on protected branches
+  (develop, main, master, release/*).
+
+EXIT CODES:
+  0   Success or user cancelled
+  1   Error occurred
+
+EXAMPLES:
+  pci              # Open CI for current branch
+  pci --help       # Show this help
+EOF
+}
+
+main() {
+  # Handle help flag
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    show_help
+    exit 0
+  fi
+
+  local branch
+  branch=$(get_current_branch) || exit 1
+
+  local workflow_file
+  workflow_file=$(find_workflow_file) || exit 1
+
+  local base_url
+  base_url=$(extract_semaphore_url "$workflow_file") || exit 1
+
+  local full_url
+  full_url=$(construct_ci_url "$base_url" "$branch")
+
+  confirm_protected_branch "$branch" || exit 0
+
+  open_ci_url "$full_url" "$branch" || exit 1
+}
+
+# Main execution, skip if sourced (in tests)
+[[ $ZSH_EVAL_CONTEXT =~ :file$ ]] && return || main "$@"
