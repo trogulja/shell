@@ -74,10 +74,12 @@ find_test_modules() {
   # Use ripgrep's --replace to extract module name directly
   # Use tab as field separator to avoid conflicts with colons in module names
   # Match only single-quoted strings (most common in the codebase)
+  # -U flag enables multiline matching to handle moduleFor calls spanning multiple lines
   rg --no-heading --with-filename --no-line-number \
     --only-matching \
+    --multiline \
     --field-match-separator $'\t' \
-    "moduleFor(?:Integration|Acceptance)?\('([^']+)'" \
+    "moduleFor(?:Integration|Acceptance)?\(\s*'([^']+)'" \
     "$tests_dir" \
     -g '*-test.{js,gjs,ts,gts}' \
     --replace '$1' \
