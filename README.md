@@ -131,3 +131,4 @@ source ~/.zshrc
 - `jq` for JSON parsing (optional for some scripts)
 - AWS CLI for `paws` script
 - `fzf` for interactive selection in `ptest`
+- `ripgrep` for fast searching in `ptest`
