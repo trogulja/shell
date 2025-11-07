@@ -1,0 +1,104 @@
+#!/usr/bin/env zsh
+# showpath - Display and debug your PATH entries with color coding
+# Usage: showpath [--help]
+
+# Load common functions (must be at top level)
+source "${0:A:h}/p-common.zsh"
+
+# Display help message
+# Usage: show_help
+show_help() {
+  cat << 'EOF'
+showpath - Display and debug your PATH entries with color coding
+
+USAGE:
+  showpath [OPTIONS]
+
+OPTIONS:
+  (no args)    Display all PATH entries with color coding
+  --help, -h   Show this help message
+
+COLOR CODING:
+  Green        User-installed tools (~/bin, ~/.local/bin, etc.)
+  Yellow       Homebrew installations (/usr/local/bin, /opt/homebrew/bin)
+  Blue         System paths (/usr/bin, /bin, /usr/sbin, /sbin)
+  Red          Duplicate entries in PATH
+
+OUTPUT:
+  Each line shows:
+    - Entry number
+    - Path with color coding
+    - Status (e.g., "duplicate" for duplicates)
+
+EXAMPLES:
+  showpath              # Display all PATH entries
+  showpath --help       # Show this help message
+
+NOTES:
+  Duplicate entries should be removed from your PATH.
+  Use 'echo $PATH' to see the raw PATH variable.
+  Use 'echo $path' to see the array format.
+EOF
+}
+
+# Display all PATH entries with categorization and color coding
+# Usage: display_path_entries
+display_path_entries() {
+  local i=1
+  local seen=()
+
+  print_status "$P_BLUE" "Your current PATH entries:"
+  echo
+
+  for p in $path; do
+    # Check for duplicates
+    if [[ " ${seen[*]} " == *" $p "* ]]; then
+      printf "%2d: ${P_RED}%s${P_NC} (duplicate)\n" $i "$p"
+    else
+      # Determine color based on path type
+      local color="$P_NC"
+
+      if [[ "$p" == "$HOME"* ]]; then
+        # Any path starting with $HOME is green
+        color="$P_GREEN"
+      elif [[ "$p" == /usr/local* || "$p" == /opt/homebrew* || "$p" == /opt/local* ]]; then
+        # Package managers are yellow
+        color="$P_YELLOW"
+      elif [[ "$p" == /usr/* || "$p" == /bin || "$p" == /sbin ]]; then
+        # System paths are blue
+        color="$P_BLUE"
+      fi
+
+      printf "%2d: ${color}%s${P_NC}\n" $i "$p"
+    fi
+
+    seen+="$p"
+    ((i++))
+  done
+
+  echo
+  print_status "$P_BLUE" "Total: ${#path[@]} entries"
+}
+
+# Main entry point
+main() {
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        show_help
+        exit 0
+        ;;
+      "")
+        shift
+        ;;
+      *)
+        die "Unknown option: $1. Use --help for usage information."
+        ;;
+    esac
+  done
+
+  display_path_entries
+}
+
+[[ $ZSH_EVAL_CONTEXT =~ :file$ ]] && return || main "$@"

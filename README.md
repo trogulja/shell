@@ -77,6 +77,8 @@ All scripts follow consistent interfaces with proper error handling, help docume
 
 - `prun-*` - Project-specific startup scripts for individual repositories (frontend, API, AI agent). Sourced by `p` dispatcher based on current repository.
 
+- `printpath` - Displays the current `PATH` variable with color-coded entries based on their origin (user, package manager, system) and highlights duplicates.
+
 ---
 
 ### Automation Scripts
