@@ -115,15 +115,28 @@ perform_login() {
 
   print_status "$P_YELLOW" "🔐 Checking AWS credentials..."
 
-  # Skip authentication check if force login requested
-  if [[ "$force_login" == "true" ]]; then
-    print_status "$P_YELLOW" "  Force login requested, running aws sso login..."
+  run_sso_login() {
+    print_status "$P_YELLOW" "  Running aws sso login..."
+
     if aws sso login; then
       print_status "$P_GREEN" "✓ AWS login successful"
       return 0
     else
       die "AWS SSO login failed"
     fi
+  }
+
+  invalidate_sso_session() {
+    print_status "$P_YELLOW" "  Invalidating cached SSO session (aws sso logout)..."
+    aws sso logout &>/dev/null || print_status "$P_YELLOW" "  Warning: aws sso logout failed (continuing)"
+  }
+
+  # Skip authentication check if force login requested
+  if [[ "$force_login" == "true" ]]; then
+    print_status "$P_YELLOW" "  Force login requested, running aws sso login..."
+    invalidate_sso_session
+    run_sso_login
+    return 0
   fi
 
   if should_refresh_login "$grace_period_minutes"; then
@@ -140,10 +153,10 @@ perform_login() {
     return 0
   fi
 
-  # Check if expired or expiring soon
+  # Need login: either not authenticated, or expiring within grace period
   local expires_at=$(get_sso_session_expiration)
   if should_refresh_login 0; then
-    # Authenticated but expiring soon
+    # Authenticated, but expiring within grace period
     if [[ -n "$expires_at" ]]; then
       local remaining_seconds=$(get_remaining_seconds "$expires_at")
       if [[ -n "$remaining_seconds" ]]; then
@@ -156,14 +169,7 @@ perform_login() {
     print_status "$P_RED" "✗ Credentials expired or invalid"
   fi
 
-  print_status "$P_YELLOW" "  Running aws sso login..."
-
-  if aws sso login; then
-    print_status "$P_GREEN" "✓ AWS login successful"
-    return 0
-  else
-    die "AWS SSO login failed"
-  fi
+  run_sso_login
 }
 
 show_help() {

@@ -12,6 +12,10 @@ Describe 'bin/paws'
     export HOME="$SHELLSPEC_TMPBASE/mock_home"
     mkdir -p "$HOME/.aws/sso/cache"
 
+    MOCK_AWS_CALLS_FILE="$SHELLSPEC_TMPBASE/aws_calls"
+    : > "$MOCK_AWS_CALLS_FILE"
+    export MOCK_AWS_CALLS_FILE
+
     MOCK_BIN_DIR="$SHELLSPEC_TMPBASE/mock_bin"
     mkdir -p "$MOCK_BIN_DIR"
 
@@ -25,7 +29,21 @@ if [ "$1" = "sts" ] && [ "$2" = "get-caller-identity" ]; then
   else
     exit 1
   fi
+elif [ "$1" = "sso" ] && [ "$2" = "logout" ]; then
+  if [ -n "${MOCK_AWS_CALLS_FILE:-}" ]; then
+    echo "sso logout" >> "$MOCK_AWS_CALLS_FILE"
+  fi
+
+  if [ "${MOCK_AWS_LOGOUT_SUCCESS:-true}" = "true" ]; then
+    exit 0
+  else
+    exit 1
+  fi
 elif [ "$1" = "sso" ] && [ "$2" = "login" ]; then
+  if [ -n "${MOCK_AWS_CALLS_FILE:-}" ]; then
+    echo "sso login" >> "$MOCK_AWS_CALLS_FILE"
+  fi
+
   if [ "$MOCK_AWS_LOGIN_SUCCESS" = "true" ]; then
     exit 0
   else
@@ -292,6 +310,12 @@ MOCK_AWS
   Describe 'perform_login()'
     AfterEach 'cleanup_mock_base'
 
+    show_mock_aws_calls() {
+      if [[ -n "${MOCK_AWS_CALLS_FILE:-}" ]] && [[ -f "$MOCK_AWS_CALLS_FILE" ]]; then
+        echo "MOCK_AWS_CALLS:$(tr '\n' '|' < "$MOCK_AWS_CALLS_FILE")"
+      fi
+    }
+
     It 'skips login when session expires in 8 hours (beyond default 30min grace)'
       setup_cache_expires_8hrs
       export MOCK_AWS_AUTHENTICATED="true"
@@ -376,12 +400,18 @@ MOCK_AWS
       export MOCK_AWS_AUTHENTICATED="true"
       export MOCK_AWS_LOGIN_SUCCESS="true"
 
-      When call perform_login 30 "true"
+      force_login_and_show_calls() {
+        perform_login 30 "true"
+        show_mock_aws_calls
+      }
+
+      When call force_login_and_show_calls
       The status should be success
       The stdout should include "Force login requested"
       The stdout should include "running aws sso login"
       The stdout should include "✓ AWS login successful"
       The stdout should not include "Already authenticated"
+      The stdout should include "MOCK_AWS_CALLS:sso logout|sso login|"
     End
 
     It 'fails when force login is requested but login fails'
@@ -389,10 +419,16 @@ MOCK_AWS
       export MOCK_AWS_AUTHENTICATED="true"
       export MOCK_AWS_LOGIN_SUCCESS="false"
 
-      When run perform_login 30 "true"
+      force_login_fail_and_show_calls() {
+        perform_login 30 "true"
+        show_mock_aws_calls
+      }
+
+      When run force_login_fail_and_show_calls
       The status should be failure
       The status should eq 1
       The stdout should include "Force login requested"
+      The stdout should include "Invalidating cached SSO session"
       The stdout should include "running aws sso login"
       The stderr should include "AWS SSO login failed"
     End
