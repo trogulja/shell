@@ -37,8 +37,7 @@ EXAMPLES:
 
 REQUIREMENTS:
   - Must be run from productiveio/ai-agent repository
-  - Requires pdetect, paws, jq, npm, and npx to be installed
-  - AWS authentication handled automatically via paws script
+  - Requires pdetect, jq, npm, and npx to be installed
 EOF
 }
 
@@ -80,15 +79,8 @@ main() {
   cd "$repo_root" || die "Failed to change to repository root"
 
   # Check for required commands
-  check_command paws
   check_command npm
   check_command npx
-
-  # Authenticate with AWS using paws
-  if ! paws -g 60; then
-    die "AWS authentication failed"
-  fi
-  echo
 
   # Pull secrets if requested
   if [[ "$do_secrets" == true ]]; then
