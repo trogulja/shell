@@ -24,7 +24,8 @@ Describe 'bin/paws'
 #!/bin/sh
 if [ "$1" = "sts" ] && [ "$2" = "get-caller-identity" ]; then
   if [ "$MOCK_AWS_AUTHENTICATED" = "true" ]; then
-    echo '{"UserId":"AIDAI123456","Account":"123456789012","Arn":"arn:aws:iam::123456789012:user/testuser"}'
+    user_id="${MOCK_AWS_USERID:-AIDAI123456}"
+    echo "{\"UserId\":\"$user_id\",\"Account\":\"123456789012\",\"Arn\":\"arn:aws:iam::123456789012:user/testuser\"}"
     exit 0
   else
     exit 1
@@ -431,6 +432,32 @@ MOCK_AWS
       The stdout should include "Invalidating cached SSO session"
       The stdout should include "running aws sso login"
       The stderr should include "AWS SSO login failed"
+    End
+  End
+  #endregion
+
+  #region: Integration Tests - show_whoami
+  Describe 'show_whoami()'
+    AfterEach 'cleanup_mock_base'
+
+    It 'prints email when authenticated'
+      setup_cache_expires_8hrs
+      export MOCK_AWS_AUTHENTICATED="true"
+      export MOCK_AWS_USERID="SOMERANDOMSTRING12345:tibor.rogulja@productive.io"
+
+      When call show_whoami
+      The status should be success
+      The stdout should eq "tibor.rogulja@productive.io"
+    End
+
+    It 'returns 1 when not authenticated'
+      setup_empty_cache
+      export MOCK_AWS_AUTHENTICATED="false"
+
+      When call show_whoami
+      The status should be failure
+      The status should eq 1
+      The stdout should eq ""
     End
   End
   #endregion

@@ -109,6 +109,20 @@ show_status() {
   return 0
 }
 
+show_whoami() {
+  if ! should_refresh_login; then
+    return 1
+  fi
+
+  local identity=$(get_caller_identity)
+  local user_id=$(extract_json_value "$identity" "UserId")
+  local email=$(echo "$user_id" | awk -F: '{print $2}')
+
+  [[ -n "$email" ]] || email="$user_id"
+  echo "$email"
+  return 0
+}
+
 perform_login() {
   local grace_period_minutes=${1:-30}
   local force_login=${2:-false}
@@ -182,6 +196,7 @@ USAGE:
 OPTIONS:
   (no args)             Perform smart login (with 30min grace period)
   --status, -s          Show detailed authentication status
+  --whoami, -w          Print logged-in user's email (exit 1 if not logged in)
   --force, -f           Force login even if already authenticated
   --grace, -g <mins>    Set grace period in minutes (default: 30)
   --help, -h            Show this help message
@@ -220,6 +235,10 @@ main() {
         action="status"
         shift
         ;;
+      --whoami|-w)
+        action="whoami"
+        shift
+        ;;
       --force|-f)
         force_login="true"
         action="login"
@@ -245,6 +264,10 @@ main() {
   case "$action" in
     status)
       show_status
+      exit $?
+      ;;
+    whoami)
+      show_whoami
       exit $?
       ;;
     login)
