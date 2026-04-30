@@ -18,23 +18,33 @@ typeset -gr POMO_DEFAULT_WORK=25
 typeset -gr POMO_DEFAULT_REST=5
 typeset -gr POMO_WORK_EMOJI="🎯"
 typeset -gr POMO_REST_EMOJI="☕"
+typeset -gr POMO_WORK_SLACK_EMOJI=":dart:"
+typeset -gr POMO_REST_SLACK_EMOJI=":coffee:"
+typeset -gr POMO_KEYCHAIN_ACCOUNT="productive"
+typeset -gr POMO_KEYCHAIN_SERVICE="SLACK_TOKEN"
 
 show_help() {
   cat <<EOF
-pomo - Pomodoro timer with desktop notifications
+pomo - Pomodoro timer with desktop notifications and Slack status
 
 Usage:
-  pomo work [minutes] [message...]
-  pomo rest [minutes] [message...]
+  pomo [--no-slack] work [minutes] [message...]
+  pomo [--no-slack] rest [minutes] [message...]
 
 Arguments:
   minutes   Optional duration in minutes
             (defaults: ${POMO_DEFAULT_WORK} for work, ${POMO_DEFAULT_REST} for rest)
   message   Optional message to display
 
+Flags:
+  --no-slack   Skip Slack status update and DND snooze for this run.
+               Slack is also auto-skipped if no SLACK_TOKEN is in macOS Keychain
+               (account: ${POMO_KEYCHAIN_ACCOUNT}, service: ${POMO_KEYCHAIN_SERVICE}).
+
 Notes:
   Any positive integer in args is treated as the duration; the rest is the message.
   Trailing position is checked first, then leading position.
+  Slack status auto-expires when the timer ends; DND snoozes only during 'work'.
 
 Examples:
   pomo work
@@ -42,6 +52,7 @@ Examples:
   pomo work 45
   pomo rest 15 quick coffee
   pomo rest quick coffee 15
+  pomo --no-slack work 25 offline focus
 EOF
 }
 
@@ -99,6 +110,84 @@ print_banner() {
   echo ""
 }
 
+# Escape a string for safe inclusion as a JSON string value
+# Usage: json_escape <string>
+# Note: handles \, ", \n, \t, \r. Does not handle other control chars.
+# Uses local vars instead of inline backslash escapes because zsh's parameter
+# replacement strips backslashes from inline literals like "\\\"".
+json_escape() {
+  local s=$1
+  local bs='\' dq='"'
+  s=${s//$bs/${bs}${bs}}
+  s=${s//$dq/${bs}${dq}}
+  s=${s//$'\n'/${bs}n}
+  s=${s//$'\t'/${bs}t}
+  s=${s//$'\r'/${bs}r}
+  print -r -n -- "$s"
+}
+
+# Get Slack user OAuth token from macOS Keychain
+# Usage: slack_token
+# Returns: token on stdout, empty string if not found
+slack_token() {
+  security find-generic-password \
+    -a "$POMO_KEYCHAIN_ACCOUNT" \
+    -s "$POMO_KEYCHAIN_SERVICE" \
+    -w 2>/dev/null
+}
+
+# Set Slack user status (text + emoji + auto-expiration)
+# Usage: slack_set_status <emoji> <text> <expiration_unix_ts>
+# No-ops silently if no token is available.
+slack_set_status() {
+  local emoji=$1 text=$2 expiration=$3
+  local token
+  token=$(slack_token)
+  [[ -z "$token" ]] && return 0
+
+  local payload
+  payload=$(printf '{"profile":{"status_text":"%s","status_emoji":"%s","status_expiration":%d}}' \
+    "$(json_escape "$text")" "$(json_escape "$emoji")" "$expiration")
+
+  curl -sS --max-time 5 -X POST \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json; charset=utf-8" \
+    -d "$payload" \
+    "https://slack.com/api/users.profile.set" >/dev/null
+}
+
+# Clear Slack user status
+# Usage: slack_clear_status
+slack_clear_status() {
+  slack_set_status "" "" 0
+}
+
+# Snooze Slack DND for N minutes
+# Usage: slack_dnd_snooze <minutes>
+slack_dnd_snooze() {
+  local minutes=$1
+  local token
+  token=$(slack_token)
+  [[ -z "$token" ]] && return 0
+
+  curl -sS --max-time 5 -X POST \
+    -H "Authorization: Bearer $token" \
+    --data-urlencode "num_minutes=$minutes" \
+    "https://slack.com/api/dnd.setSnooze" >/dev/null
+}
+
+# End Slack DND snooze
+# Usage: slack_dnd_end
+slack_dnd_end() {
+  local token
+  token=$(slack_token)
+  [[ -z "$token" ]] && return 0
+
+  curl -sS --max-time 5 -X POST \
+    -H "Authorization: Bearer $token" \
+    "https://slack.com/api/dnd.endSnooze" >/dev/null
+}
+
 # Send completion notification
 # Usage: notify_complete <mode> <message>
 notify_complete() {
@@ -119,6 +208,56 @@ notify_complete() {
     -sound default >/dev/null
 }
 
+# Strip --no-slack from positional args
+# Sets global POMO_NO_SLACK=1 if flag was present, then sets POMO_FILTERED_ARGS
+# Usage: filter_flags "$@"
+filter_flags() {
+  POMO_NO_SLACK=0
+  POMO_FILTERED_ARGS=()
+  local a
+  for a in "$@"; do
+    if [[ "$a" == "--no-slack" ]]; then
+      POMO_NO_SLACK=1
+    else
+      POMO_FILTERED_ARGS+=("$a")
+    fi
+  done
+}
+
+# Decide whether Slack updates should happen this run
+# Usage: slack_enabled
+# Returns: 0 if enabled, 1 if disabled
+slack_enabled() {
+  (( POMO_NO_SLACK )) && return 1
+  [[ -n "$(slack_token)" ]]
+}
+
+# Apply Slack status + (for work) DND snooze for this session
+# Usage: slack_session_start <mode> <duration> <message>
+slack_session_start() {
+  local mode=$1 duration=$2 message=$3
+  local emoji expire_ts
+  expire_ts=$(( $(date +%s) + duration * 60 ))
+
+  if [[ "$mode" == "work" ]]; then
+    emoji="$POMO_WORK_SLACK_EMOJI"
+    slack_set_status "$emoji" "$message" "$expire_ts"
+    slack_dnd_snooze "$duration"
+  else
+    emoji="$POMO_REST_SLACK_EMOJI"
+    slack_set_status "$emoji" "$message" "$expire_ts"
+  fi
+}
+
+# Restore Slack to neutral state (clear status, end DND if work)
+# Usage: slack_session_end <mode>
+slack_session_end() {
+  local mode=$1
+  slack_clear_status
+  [[ "$mode" == "work" ]] && slack_dnd_end
+  return 0
+}
+
 main() {
   if [[ "$1" == "--help" || "$1" == "-h" ]]; then
     show_help
@@ -128,11 +267,26 @@ main() {
   check_command timer
   check_command terminal-notifier
 
-  parse_args "$@" || exit $?
+  filter_flags "$@"
+  parse_args "${POMO_FILTERED_ARGS[@]}" || exit $?
+
+  local slack_on=0
+  if slack_enabled; then
+    slack_on=1
+    slack_session_start "$POMO_MODE" "$POMO_DURATION" "$POMO_MESSAGE"
+    trap '(( slack_on )) && slack_session_end "$POMO_MODE"; exit 130' INT TERM
+  fi
 
   print_banner "$POMO_MODE" "$POMO_DURATION" "$POMO_MESSAGE"
 
-  timer "${POMO_DURATION}m" || exit $?
+  if ! timer "${POMO_DURATION}m"; then
+    local rc=$?
+    (( slack_on )) && slack_session_end "$POMO_MODE"
+    exit $rc
+  fi
+
+  trap - INT TERM
+  (( slack_on )) && slack_session_end "$POMO_MODE"
 
   notify_complete "$POMO_MODE" "$POMO_MESSAGE"
 }

@@ -118,6 +118,192 @@ Describe 'bin/pomo'
       The status should be success
       The stdout should include 'pomo - Pomodoro timer'
     End
+
+    It 'documents the --no-slack flag'
+      When run main --help
+      The status should be success
+      The stdout should include '--no-slack'
+    End
+  End
+  #endregion
+
+  #region: json_escape
+  Describe 'json_escape()'
+    It 'passes plain text unchanged'
+      When call json_escape 'hello world'
+      The stdout should eq 'hello world'
+    End
+
+    It 'escapes double quotes'
+      When call json_escape 'say "hi"'
+      The stdout should eq 'say \"hi\"'
+    End
+
+    It 'escapes backslashes'
+      When call json_escape 'a\b'
+      The stdout should eq 'a\\b'
+    End
+
+    It 'escapes backslash before quotes correctly'
+      When call json_escape 'a\"b'
+      The stdout should eq 'a\\\"b'
+    End
+  End
+  #endregion
+
+  #region: filter_flags
+  Describe 'filter_flags()'
+    It 'leaves args untouched when --no-slack absent'
+      When call filter_flags work 25 hello
+      The variable POMO_NO_SLACK should eq '0'
+      The value "${POMO_FILTERED_ARGS[*]}" should eq 'work 25 hello'
+    End
+
+    It 'sets POMO_NO_SLACK and removes flag when present'
+      When call filter_flags --no-slack work 25
+      The variable POMO_NO_SLACK should eq '1'
+      The value "${POMO_FILTERED_ARGS[*]}" should eq 'work 25'
+    End
+
+    It 'finds --no-slack regardless of position'
+      When call filter_flags work 25 --no-slack hello
+      The variable POMO_NO_SLACK should eq '1'
+      The value "${POMO_FILTERED_ARGS[*]}" should eq 'work 25 hello'
+    End
+  End
+  #endregion
+
+  #region: Slack helpers - mocks
+  Describe 'Slack helpers'
+    setup_slack_mocks() {
+      MOCK_BIN_DIR="$SHELLSPEC_TMPBASE/mock_bin"
+      mkdir -p "$MOCK_BIN_DIR"
+      MOCK_CURL_LOG="$SHELLSPEC_TMPBASE/curl_calls"
+      : > "$MOCK_CURL_LOG"
+      export MOCK_CURL_LOG
+
+      cat > "$MOCK_BIN_DIR/security" << 'MOCK_SEC'
+#!/bin/sh
+if [ -n "$MOCK_SLACK_TOKEN" ]; then
+  printf '%s' "$MOCK_SLACK_TOKEN"
+  exit 0
+fi
+exit 44
+MOCK_SEC
+      chmod +x "$MOCK_BIN_DIR/security"
+
+      cat > "$MOCK_BIN_DIR/curl" << 'MOCK_CURL'
+#!/bin/sh
+{
+  echo "---"
+  for a in "$@"; do echo "ARG:$a"; done
+} >> "$MOCK_CURL_LOG"
+exit 0
+MOCK_CURL
+      chmod +x "$MOCK_BIN_DIR/curl"
+      export PATH="$MOCK_BIN_DIR:$PATH"
+    }
+
+    cleanup_slack_mocks() {
+      rm -rf "$MOCK_BIN_DIR"
+      unset MOCK_SLACK_TOKEN
+    }
+
+    BeforeEach 'setup_slack_mocks'
+    AfterEach 'cleanup_slack_mocks'
+
+    Describe 'slack_token()'
+      It 'returns the keychain token when set'
+        export MOCK_SLACK_TOKEN='xoxp-test-1'
+        When call slack_token
+        The status should be success
+        The stdout should eq 'xoxp-test-1'
+      End
+
+      It 'returns empty when keychain entry missing'
+        When call slack_token
+        The status should be failure
+        The stdout should eq ''
+      End
+    End
+
+    Describe 'slack_set_status()'
+      It 'no-ops silently when no token'
+        When call slack_set_status ':dart:' 'focus' 0
+        The status should be success
+        The contents of file "$MOCK_CURL_LOG" should eq ''
+      End
+
+      It 'POSTs to users.profile.set when token present'
+        export MOCK_SLACK_TOKEN='xoxp-test-1'
+        When call slack_set_status ':dart:' 'focus' 1777551675
+        The status should be success
+        The contents of file "$MOCK_CURL_LOG" should include 'https://slack.com/api/users.profile.set'
+        The contents of file "$MOCK_CURL_LOG" should include 'Authorization: Bearer xoxp-test-1'
+        The contents of file "$MOCK_CURL_LOG" should include ':dart:'
+        The contents of file "$MOCK_CURL_LOG" should include '"status_text":"focus"'
+        The contents of file "$MOCK_CURL_LOG" should include '"status_expiration":1777551675'
+      End
+
+      It 'JSON-escapes the message text'
+        export MOCK_SLACK_TOKEN='xoxp-test-1'
+        When call slack_set_status ':dart:' 'say "hi"' 0
+        The contents of file "$MOCK_CURL_LOG" should include '"status_text":"say \"hi\""'
+      End
+    End
+
+    Describe 'slack_dnd_snooze()'
+      It 'no-ops when no token'
+        When call slack_dnd_snooze 25
+        The status should be success
+        The contents of file "$MOCK_CURL_LOG" should eq ''
+      End
+
+      It 'POSTs to dnd.setSnooze with num_minutes'
+        export MOCK_SLACK_TOKEN='xoxp-test-1'
+        When call slack_dnd_snooze 25
+        The status should be success
+        The contents of file "$MOCK_CURL_LOG" should include 'https://slack.com/api/dnd.setSnooze'
+        The contents of file "$MOCK_CURL_LOG" should include 'num_minutes=25'
+      End
+    End
+
+    Describe 'slack_dnd_end()'
+      It 'no-ops when no token'
+        When call slack_dnd_end
+        The status should be success
+        The contents of file "$MOCK_CURL_LOG" should eq ''
+      End
+
+      It 'POSTs to dnd.endSnooze when token present'
+        export MOCK_SLACK_TOKEN='xoxp-test-1'
+        When call slack_dnd_end
+        The status should be success
+        The contents of file "$MOCK_CURL_LOG" should include 'https://slack.com/api/dnd.endSnooze'
+      End
+    End
+
+    Describe 'slack_enabled()'
+      It 'is disabled when --no-slack flag set'
+        export MOCK_SLACK_TOKEN='xoxp-test-1'
+        POMO_NO_SLACK=1
+        When call slack_enabled
+        The status should be failure
+      End
+
+      It 'is disabled when token missing'
+        POMO_NO_SLACK=0
+        When call slack_enabled
+        The status should be failure
+      End
+
+      It 'is enabled when token present and flag unset'
+        export MOCK_SLACK_TOKEN='xoxp-test-1'
+        POMO_NO_SLACK=0
+        When call slack_enabled
+        The status should be success
+      End
+    End
   End
   #endregion
 End
