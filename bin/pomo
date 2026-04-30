@@ -1,0 +1,141 @@
+#!/usr/bin/env zsh
+# pomo - Pomodoro timer with desktop notifications
+#
+# Usage:
+#   pomo work [minutes] [message...]
+#   pomo rest [minutes] [message...]
+#
+# Examples:
+#   pomo work                    # 25 minute work timer
+#   pomo rest                    # 5 minute rest timer
+#   pomo work 45                 # 45 minute work timer
+#   pomo rest 15 some message    # 15 minute rest with "some message"
+#   pomo rest some message 15    # number can be anywhere among args
+
+source "${0:A:h}/p-common.zsh"
+
+typeset -gr POMO_DEFAULT_WORK=25
+typeset -gr POMO_DEFAULT_REST=5
+typeset -gr POMO_WORK_EMOJI="🎯"
+typeset -gr POMO_REST_EMOJI="☕"
+
+show_help() {
+  cat <<EOF
+pomo - Pomodoro timer with desktop notifications
+
+Usage:
+  pomo work [minutes] [message...]
+  pomo rest [minutes] [message...]
+
+Arguments:
+  minutes   Optional duration in minutes
+            (defaults: ${POMO_DEFAULT_WORK} for work, ${POMO_DEFAULT_REST} for rest)
+  message   Optional message to display
+
+Notes:
+  Any positive integer in args is treated as the duration; the rest is the message.
+  Trailing position is checked first, then leading position.
+
+Examples:
+  pomo work
+  pomo rest
+  pomo work 45
+  pomo rest 15 quick coffee
+  pomo rest quick coffee 15
+EOF
+}
+
+# Parse mode/duration/message from args
+# Sets globals: POMO_MODE, POMO_DURATION, POMO_MESSAGE
+# Usage: parse_args <mode> [args...]
+parse_args() {
+  local mode=$1
+  shift
+  local args=("$@")
+
+  if [[ ! "$mode" =~ ^(work|rest)$ ]]; then
+    die "First argument must be either 'work' or 'rest'"
+  fi
+
+  local default_duration
+  default_duration=$([[ "$mode" == "work" ]] && echo $POMO_DEFAULT_WORK || echo $POMO_DEFAULT_REST)
+
+  local duration=""
+  local message=""
+
+  if (( ${#args[@]} == 0 )); then
+    duration=$default_duration
+  elif [[ "${args[-1]}" =~ ^[0-9]+$ ]]; then
+    duration="${args[-1]}"
+    message="${(j: :)args[1,-2]}"
+  elif [[ "${args[1]}" =~ ^[0-9]+$ ]]; then
+    duration="${args[1]}"
+    message="${(j: :)args[2,-1]}"
+  else
+    duration=$default_duration
+    message="${(j: :)args}"
+  fi
+
+  if [[ -z "${message// }" ]]; then
+    message=$([[ "$mode" == "work" ]] && echo "Work timer" || echo "Rest timer")
+  fi
+
+  POMO_MODE="$mode"
+  POMO_DURATION="$duration"
+  POMO_MESSAGE="$message"
+}
+
+# Print start banner
+# Usage: print_banner <mode> <duration> <message>
+print_banner() {
+  local mode=$1
+  local duration=$2
+  local message=$3
+  local emoji=$([[ "$mode" == "work" ]] && echo "$POMO_WORK_EMOJI" || echo "$POMO_REST_EMOJI")
+
+  clear
+  echo ""
+  echo "$emoji $message started for $duration minutes"
+  echo ""
+}
+
+# Send completion notification
+# Usage: notify_complete <mode> <message>
+notify_complete() {
+  local mode=$1
+  local message=$2
+  local emoji title
+  if [[ "$mode" == "work" ]]; then
+    emoji="$POMO_WORK_EMOJI"
+    title="Work timer is up! Take a break ☕"
+  else
+    emoji="$POMO_REST_EMOJI"
+    title="Rest timer is up! Get back to work 🎯"
+  fi
+
+  terminal-notifier \
+    -message "$emoji $message" \
+    -title "$title" \
+    -sound default >/dev/null
+}
+
+main() {
+  if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    show_help
+    return 0
+  fi
+
+  check_command timer
+  check_command terminal-notifier
+
+  parse_args "$@" || exit $?
+
+  print_banner "$POMO_MODE" "$POMO_DURATION" "$POMO_MESSAGE"
+
+  timer "${POMO_DURATION}m" || exit $?
+
+  notify_complete "$POMO_MODE" "$POMO_MESSAGE"
+}
+
+# Skip main when sourced (e.g. in tests)
+[[ $ZSH_EVAL_CONTEXT =~ :file$ ]] && return || main "$@"
