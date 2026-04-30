@@ -22,6 +22,13 @@ typeset -gr POMO_WORK_SLACK_EMOJI=":dart:"
 typeset -gr POMO_REST_SLACK_EMOJI=":coffee:"
 typeset -gr POMO_KEYCHAIN_ACCOUNT="productive"
 typeset -gr POMO_KEYCHAIN_SERVICE="SLACK_TOKEN"
+typeset -gr POMO_FOCUS_SHORTCUT_ON="Pomo DND On"
+typeset -gr POMO_FOCUS_SHORTCUT_OFF="Pomo DND Off"
+typeset -gr POMO_FOCUS_RESTORE_WORK_SHORTCUT="Pomo Focus Work"
+typeset -gr POMO_FOCUS_RESTORE_SLEEP_SHORTCUT="Pomo Focus Sleep"
+typeset -gr POMO_FOCUS_DB_ASSERTIONS="$HOME/Library/DoNotDisturb/DB/Assertions.json"
+typeset -gr POMO_FOCUS_MODE_WORK="com.apple.focus.work"
+typeset -gr POMO_FOCUS_MODE_SLEEP="com.apple.sleep.sleep-mode"
 
 show_help() {
   cat <<EOF
@@ -40,11 +47,15 @@ Flags:
   --no-slack   Skip Slack status update and DND snooze for this run.
                Slack is also auto-skipped if no SLACK_TOKEN is in macOS Keychain
                (account: ${POMO_KEYCHAIN_ACCOUNT}, service: ${POMO_KEYCHAIN_SERVICE}).
+  --no-focus   Skip macOS Focus toggle for this run.
+               Focus is also auto-skipped if 'shortcuts' CLI is not available
+               or the '${POMO_FOCUS_SHORTCUT_ON}' / '${POMO_FOCUS_SHORTCUT_OFF}' shortcuts are missing.
 
 Notes:
   Any positive integer in args is treated as the duration; the rest is the message.
   Trailing position is checked first, then leading position.
   Slack status auto-expires when the timer ends; DND snoozes only during 'work'.
+  macOS Focus is enabled only during 'work' and turned off when the timer ends.
 
 Examples:
   pomo work
@@ -188,6 +199,51 @@ slack_dnd_end() {
     "https://slack.com/api/dnd.endSnooze" >/dev/null
 }
 
+# Read the currently active macOS Focus mode identifier
+# Usage: focus_current_mode
+# Returns: mode identifier on stdout (e.g. "com.apple.focus.work"), empty if no Focus active
+# Reads ~/Library/DoNotDisturb/DB/Assertions.json - this is the live state file used by donotdisturbd.
+# storeAssertionRecords[] is the array of currently-active assertions; empty array == no Focus.
+focus_current_mode() {
+  [[ -r "$POMO_FOCUS_DB_ASSERTIONS" ]] || return 0
+  jq -r '
+    .data[0].storeAssertionRecords[0].assertionDetails.assertionDetailsModeIdentifier // empty
+  ' "$POMO_FOCUS_DB_ASSERTIONS" 2>/dev/null
+}
+
+# Map a Focus mode identifier to a restore shortcut name
+# Usage: focus_restore_shortcut <mode_identifier>
+# Returns: shortcut name on stdout, empty if no restore shortcut is defined for that mode
+# Add new mappings here as you create more "Pomo Focus <name>" shortcuts.
+focus_restore_shortcut() {
+  case $1 in
+    "$POMO_FOCUS_MODE_WORK")  print -r -- "$POMO_FOCUS_RESTORE_WORK_SHORTCUT" ;;
+    "$POMO_FOCUS_MODE_SLEEP") print -r -- "$POMO_FOCUS_RESTORE_SLEEP_SHORTCUT" ;;
+    *) ;;
+  esac
+}
+
+# Turn macOS Focus (Do Not Disturb) on via Shortcuts CLI
+# Usage: focus_session_start
+focus_session_start() {
+  shortcuts run "$POMO_FOCUS_SHORTCUT_ON" </dev/null >/dev/null 2>&1
+}
+
+# Turn macOS Focus off and restore previously-active mode if we have a shortcut for it
+# Usage: focus_session_end <previous_mode_identifier>
+# Pass empty string if no mode was active before the session.
+focus_session_end() {
+  local prev_mode=$1
+  shortcuts run "$POMO_FOCUS_SHORTCUT_OFF" </dev/null >/dev/null 2>&1
+
+  [[ -z "$prev_mode" ]] && return 0
+  local restore_shortcut
+  restore_shortcut=$(focus_restore_shortcut "$prev_mode")
+  [[ -z "$restore_shortcut" ]] && return 0
+  shortcuts list 2>/dev/null | grep -qxF "$restore_shortcut" || return 0
+  shortcuts run "$restore_shortcut" </dev/null >/dev/null 2>&1
+}
+
 # Send completion notification
 # Usage: notify_complete <mode> <message>
 notify_complete() {
@@ -213,14 +269,15 @@ notify_complete() {
 # Usage: filter_flags "$@"
 filter_flags() {
   POMO_NO_SLACK=0
+  POMO_NO_FOCUS=0
   POMO_FILTERED_ARGS=()
   local a
   for a in "$@"; do
-    if [[ "$a" == "--no-slack" ]]; then
-      POMO_NO_SLACK=1
-    else
-      POMO_FILTERED_ARGS+=("$a")
-    fi
+    case "$a" in
+      --no-slack) POMO_NO_SLACK=1 ;;
+      --no-focus) POMO_NO_FOCUS=1 ;;
+      *)          POMO_FILTERED_ARGS+=("$a") ;;
+    esac
   done
 }
 
@@ -230,6 +287,19 @@ filter_flags() {
 slack_enabled() {
   (( POMO_NO_SLACK )) && return 1
   [[ -n "$(slack_token)" ]]
+}
+
+# Decide whether macOS Focus toggle should happen this run
+# Usage: focus_enabled <mode>
+# Returns: 0 if enabled, 1 if disabled
+# Focus only triggers for 'work' mode (rest stays interruptible).
+focus_enabled() {
+  local mode=$1
+  (( POMO_NO_FOCUS )) && return 1
+  [[ "$mode" == "work" ]] || return 1
+  command -v shortcuts &>/dev/null || return 1
+  shortcuts list 2>/dev/null | grep -qxF "$POMO_FOCUS_SHORTCUT_ON" || return 1
+  shortcuts list 2>/dev/null | grep -qxF "$POMO_FOCUS_SHORTCUT_OFF" || return 1
 }
 
 # Apply Slack status + (for work) DND snooze for this session
@@ -270,11 +340,19 @@ main() {
   filter_flags "$@"
   parse_args "${POMO_FILTERED_ARGS[@]}" || exit $?
 
-  local slack_on=0
+  local slack_on=0 focus_on=0
+  local focus_prev_mode=""
   if slack_enabled; then
     slack_on=1
     slack_session_start "$POMO_MODE" "$POMO_DURATION" "$POMO_MESSAGE"
-    trap '(( slack_on )) && slack_session_end "$POMO_MODE"; exit 130' INT TERM
+  fi
+  if focus_enabled "$POMO_MODE"; then
+    focus_on=1
+    focus_prev_mode=$(focus_current_mode)
+    focus_session_start
+  fi
+  if (( slack_on || focus_on )); then
+    trap '(( slack_on )) && slack_session_end "$POMO_MODE"; (( focus_on )) && focus_session_end "$focus_prev_mode"; exit 130' INT TERM
   fi
 
   print_banner "$POMO_MODE" "$POMO_DURATION" "$POMO_MESSAGE"
@@ -282,11 +360,13 @@ main() {
   if ! timer "${POMO_DURATION}m"; then
     local rc=$?
     (( slack_on )) && slack_session_end "$POMO_MODE"
+    (( focus_on )) && focus_session_end "$focus_prev_mode"
     exit $rc
   fi
 
   trap - INT TERM
   (( slack_on )) && slack_session_end "$POMO_MODE"
+  (( focus_on )) && focus_session_end "$focus_prev_mode"
 
   notify_complete "$POMO_MODE" "$POMO_MESSAGE"
 }
